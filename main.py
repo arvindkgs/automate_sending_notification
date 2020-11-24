@@ -18,9 +18,10 @@ from websocket import create_connection, WebSocketBadStatusException
 SERVICE_NAME = "load-test"
 NO_OF_NOTIFICATIONS = 100
 rainier_url = "https://rainier.local/"
-password = "Rainier!20"
+tenant_name = "notification-test-tenant-1"
 
 #Non-Editable
+password = "Rainier!20"
 warnings.filterwarnings("ignore")
 token = None
 service_token = None
@@ -44,7 +45,6 @@ class LoadTest(unittest.TestCase):
         base_tenant_id = self.getBaseTenantId()
         global roleIdMap
         roleIdMap = self.getRoleIdMap()
-        tenant_name = "notification-test-tenant-1"
         username = "nobody." + MAILOSAUR_SERVER_NAME + "@mailosaur.io"
         seconds_since_epoch = datetime.now().timestamp()
 
