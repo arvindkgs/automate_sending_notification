@@ -14,13 +14,18 @@ from mailosaur import MailosaurClient
 from mailosaur.models import SearchCriteria
 from websocket import create_connection, WebSocketBadStatusException
 
+from utils.commandwatch import CommandWatch
+
 #Editable
 SERVICE_NAME = "load-test"
-NO_OF_NOTIFICATIONS = 100
-rainier_url = "https://rainier.local/"
+NO_OF_NOTIFICATIONS = 1000
+ws_url = 'ws://localhost:8080'
+rainier_url = "https://rainier.local"
 tenant_name = "notification-test-tenant-1"
+validate = False
 
 #Non-Editable
+TIMEOUT = 6 * NO_OF_NOTIFICATIONS
 password = "Rainier!20"
 warnings.filterwarnings("ignore")
 token = None
@@ -50,20 +55,29 @@ class LoadTest(unittest.TestCase):
 
         #Create User
         user_id = self.createUser(username)
+        # user_id = "dcc04f9e-e434-486b-8dd1-758c419a98a3"
         print("created user-id: "+user_id)
 
         #Create tenant
         tenant_id = self.createTenant(tenant_name, [username])
+        # tenant_id = "f53e2a05-ab00-4070-aa10-9134ddae0d2d"
         print("created tenant-id: "+tenant_id)
 
         #Create subscription
         self.createSubscription(SERVICE_NAME, tenant_id, user_id, username)
 
         body = "This is Sample Event one sent - " + str(seconds_since_epoch)
+        execptionRaised = False
         try:
             #Generate and send notification
-            ws = create_connection('ws://localhost:8080/audit/ws/audit-ingest', header={"Authorization":"Bearer "+service_token}, sslopt={"cert_reqs": ssl.CERT_NONE})
-            print("Sending +"+NO_OF_NOTIFICATIONS+" notification, Body: "+body)
+            ws = create_connection(ws_url+'/audit/ws/audit-ingest', header={"Authorization":"Bearer "+service_token}, sslopt={"cert_reqs": ssl.CERT_NONE})
+            #Start thread to listen to audit logs
+            auditLogWatcher = CommandWatch(cmd='kubectl -n rainier logs -f --tail 0 rainier-audit-0',
+                                           countdown=NO_OF_NOTIFICATIONS,
+                                           end_pattern=".*(Email Sent Successfully for:).*",
+                                           start_pattern=".*(Size of notification queue is:)\s*\d+\s+(Size of event queue is:)\s*\d+")
+            audit_run_task = auditLogWatcher.submit(TIMEOUT)
+            print("Sending "+str(NO_OF_NOTIFICATIONS)+" notification, Body: "+body)
             msg = stomper.Frame()
             msg.cmd = 'SEND'
             msg.headers = {'destination': '/events/post', 'content_type': 'application/json', 'receipt': 'new-receipt'}
@@ -80,11 +94,14 @@ class LoadTest(unittest.TestCase):
             print(err)
             print(traceback.print_exc())
             print("-------------------------------------------------------------------")
+            execptionRaised = True
+            exit(1)
         finally:
-            #Wait till all notifications are read from queue
-            print("Waiting for handling notifications from queue, before cleanup .....")
-            time.sleep(120)
-            print("Done waiting")
+            if not execptionRaised:
+                #Wait till all notifications are read from queue
+                print("Checking audit logs .....")
+                runtime = audit_run_task.result()
+                print("Notifications processing time taken: "+str(runtime)+" s")
 
             #Delete subscription
             self.deleteSubscription(username, tenant_id)
@@ -95,31 +112,41 @@ class LoadTest(unittest.TestCase):
             #Delete user
             self.deleteUser(user_id)
 
-        #Verify email notifications
-        print("Waiting for emails to be sent .....")
-        time.sleep(180)
-        print("Done waiting")
+        if validate:
+            #Verify email notifications
+            print("Waiting for emails to be sent .....")
+            time.sleep(60)
+            print("Done waiting")
 
-        # client = MailosaurClient("XsGBz8E2AAjmekW")
-        client = MailosaurClient(MAILOSAUS_API_KEY)
+            # client = MailosaurClient("XsGBz8E2AAjmekW")
+            client = MailosaurClient(MAILOSAUS_API_KEY)
 
-        # 2. Build search criteria to find the email you have sent
-        criteria = SearchCriteria()
-        criteria.sent_to = username
-        criteria.subject = "INFO Alert"
-        criteria.sent_from = "noreply-iotnms@cisco.com"
-        criteria.body = body
+            # 2. Build search criteria to find the email you have sent
+            criteria = SearchCriteria()
+            criteria.sent_to = username
+            criteria.subject = "INFO Alert"
+            criteria.sent_from = "noreply-iotnms@cisco.com"
+            criteria.body = body
+            try:
+                # 3. Wait for the message (by default only looks for messages received in the last hour)
+                messages = client.messages.search(MAILOSAUR_SERVER_NAME, criteria)
+                t_end = time.time() + 60*2 #wait for 2 mins
+                i=1
+                while time.time() < t_end and len(messages.items) < NO_OF_NOTIFICATIONS:
+                    time.sleep(10*i)
+                    messages = client.messages.search(MAILOSAUR_SERVER_NAME, criteria)
+            except err:
+                print(err)
+                print(traceback.print_exc())
 
-        # 3. Wait for the message (by default only looks for messages received in the last hour)
-        messages = client.messages.search(MAILOSAUR_SERVER_NAME, criteria)
-        # 4. Assert that the email subject is what we expect
-        self.assertEqual(NO_OF_NOTIFICATIONS, len(messages.items))
+            # 4. Assert that the email subject is what we expect
+            self.assertEqual(NO_OF_NOTIFICATIONS, len(messages.items))
 
-        for message in messages.items:
-            client.messages.delete(message.id)
+            for message in messages.items:
+                client.messages.delete(message.id)
 
     def deleteSubscription(self, username, tenant_id):
-        url = rainier_url + "audit/api/notification/subscriptions" + "?"
+        url = rainier_url + "/audit/api/notification/subscriptions" + "?"
         # set params
         url += "service-name=" + SERVICE_NAME + "&" + "group-id=" + SERVICE_NAME + "-user-" + username
         headers = {
@@ -130,7 +157,7 @@ class LoadTest(unittest.TestCase):
         print("Deleted subscription for service: " + SERVICE_NAME + ", group: " + SERVICE_NAME + "-user-" + username)
 
     def createSubscription(self, service_name, tenant_id, user_id, username):
-        url = rainier_url + "audit/api/notification/subscriptions"
+        url = rainier_url + "/audit/api/notification/subscriptions"
         payload = {
             "service-name": service_name,
             "groups": [
@@ -163,7 +190,7 @@ class LoadTest(unittest.TestCase):
         self.call(url, "POST", headers, payload, True)
 
     def getServiceToken(self):
-        url = rainier_url + "iam/auth/token"
+        url = rainier_url + "/iam/auth/token"
         payload = {
             "client_id": "audit",
             "client_secret": "75afee93-5a3b-41b3-ab36-d35373a52da6",
@@ -177,12 +204,12 @@ class LoadTest(unittest.TestCase):
         return token
 
     def deleteUser(self, user_id):
-        url = rainier_url + "iam/users/" + user_id
+        url = rainier_url + "/iam/users/" + user_id
         self.call_iotadmin(url, "DELETE", {}, {})
         print("Deleted user id: " + user_id)
 
     def deleteTenant(self, tenant_id):
-        url = rainier_url + "iam/tenants/" + tenant_id
+        url = rainier_url + "/iam/tenants/" + tenant_id
         self.call_iotadmin(url, "DELETE", {}, {})
         print("Deleted tenant id: " + tenant_id)
 
@@ -203,7 +230,7 @@ class LoadTest(unittest.TestCase):
                     }
                 ]
         }
-        response = self.call_iotadmin(rainier_url + "iam/users", "POST", {}, payload)
+        response = self.call_iotadmin(rainier_url + "/iam/users", "POST", {}, payload)
         return response.json()["user_uuid"]
 
 
@@ -217,18 +244,18 @@ class LoadTest(unittest.TestCase):
             "services": [],
             "notification_history": []
         }
-        response = self.call_iotadmin(rainier_url + "iam/tenants", "POST", {}, payload)
+        response = self.call_iotadmin(rainier_url + "/iam/tenants", "POST", {}, payload)
         return response.json()["tenant_uuid"]
 
 
     def getBaseTenantId(self):
-        response = self.call_iotadmin(rainier_url +"iam/tenants", "GET", headers={}, payload={})
+        response = self.call_iotadmin(rainier_url +"/iam/tenants", "GET", headers={}, payload={})
         base_tenant_id = [tenant['id'] for tenant in response.json()['tenants'] if tenant['name'] == "Base Tenant"][0]
         print('Base Tenant ID: ' + base_tenant_id)
         return base_tenant_id
 
     def getRoleIdMap(self):
-        response = self.call_iotadmin(rainier_url + "iam/roles", "GET", headers={}, payload={})
+        response = self.call_iotadmin(rainier_url + "/iam/roles", "GET", headers={}, payload={})
         return {role['name']:role['id'] for role in response.json()["roles"]}
 
     def call(self, url, method, headers, payload, service=False):
@@ -271,7 +298,7 @@ class LoadTest(unittest.TestCase):
         return response
 
     def getToken(self):
-        url = rainier_url+"iam/auth/token"
+        url = rainier_url + "/iam/auth/token"
         payload = {
             "grant-type": "client-credentials",
             "username": BASE_ADMIN_USERNAME,
