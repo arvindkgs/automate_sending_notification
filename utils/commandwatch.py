@@ -89,17 +89,19 @@ class CommandWatch():
                         start_time = time.time()
                         started = True
                 if self.end_pattern and self.end_pattern.match(line):
+                    print(line)
                     count += 1
+        print("Count: "+str(count))
         end_time = time.time()
         return end_time - start_time
 
 if __name__ == "__main__":
     randomEchoWatch = CommandWatch(
-        cmd='while true; do sleep 1; val=$RANDOM; if [[ $(( val % 2 )) -eq 0 ]]; then echo "Size of notification queue is: $val"; fi; done;',
-        countdown=50,
-        end_pattern=".*(Size of notification queue is:)\s*\d+\s*")
-    future = randomEchoWatch.submit(10)
-    print("Some task...")
+        #cmd='while true; do sleep 1; val=$RANDOM; if [[ $(( val % 2 )) -eq 0 ]]; then echo "Size of notification queue is: $val"; fi; done;',
+        cmd='kubectl -n rainier logs -f --tail 0 rainier-audit-0',
+        countdown=100,
+        end_pattern=".(.*(Updating email count: \d+ for tenant: .*).*|.*(Updating sms count: \d+ for tenant: .*).*)")
+    future = randomEchoWatch.submit()
     try:
         print("Time taken: "+str(future.result())+" s")
     except TimeoutError as err:
